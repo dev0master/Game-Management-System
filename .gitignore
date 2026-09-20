@@ -1,0 +1,16 @@
+node_modules/
+dist/
+target/
+*.local
+.DS_Store
+Thumbs.db
+
+# Tauri build output
+src-tauri/target/
+src-tauri/gen/
+
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+secrets.bin

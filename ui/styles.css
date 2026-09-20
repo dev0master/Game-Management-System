@@ -1,0 +1,728 @@
+/* GameVault UI.
+ *
+ * Every directional rule uses logical properties (inline-start/end, margin-inline,
+ * padding-inline, border-inline). Switching the document to dir="rtl" then mirrors the
+ * entire layout with no second stylesheet and no per-component overrides.
+ */
+
+:root {
+  --bg: #0f141b;
+  --surface: #161d27;
+  --surface-2: #1c2531;
+  --surface-3: #232e3c;
+  --line: #2a3644;
+  --text: #e6edf3;
+  --text-dim: #93a1b1;
+  --text-faint: #64738a;
+  --accent: #3dd6b0;
+  --accent-dim: #2a937a;
+  --warn: #f0b429;
+  --danger: #f2686b;
+  --radius: 12px;
+  --radius-sm: 8px;
+  --shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+* { box-sizing: border-box; }
+
+/* A `display` rule in author CSS outranks the user-agent's [hidden] rule, so any
+ * element given an explicit display (.search, .badge) would ignore `hidden`. */
+[hidden] { display: none !important; }
+
+html, body {
+  height: 100%;
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Segoe UI", "Segoe UI Variable", system-ui, sans-serif;
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+/* Arabic needs slightly more line height and a font that has real Arabic glyphs. */
+html[lang="ar"] body {
+  font-family: "Segoe UI", "Tahoma", "Arabic Typesetting", system-ui, sans-serif;
+  line-height: 1.7;
+}
+
+button, input { font: inherit; color: inherit; }
+
+#app {
+  display: grid;
+  grid-template-columns: 236px 1fr;
+  height: 100vh;
+}
+
+/* ---------------------------------------------------------------- sidebar */
+
+.sidebar {
+  background: var(--surface);
+  border-inline-end: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  padding: 18px 14px;
+  gap: 22px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 650;
+  font-size: 16px;
+  letter-spacing: 0.2px;
+  padding-inline-start: 6px;
+}
+
+.brand-mark {
+  width: 26px;
+  height: 26px;
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.6;
+  stroke-linejoin: round;
+  flex: none;
+}
+
+.nav { display: flex; flex-direction: column; gap: 2px; }
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  inline-size: 100%;
+  padding: 9px 12px;
+  background: none;
+  border: 0;
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  cursor: pointer;
+  text-align: start;
+  transition: background 0.12s, color 0.12s;
+}
+
+.nav-item:hover { background: var(--surface-2); color: var(--text); }
+
+.nav-item.is-active {
+  background: var(--surface-3);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.nav-icon {
+  inline-size: 18px;
+  text-align: center;
+  opacity: 0.85;
+  font-size: 13px;
+}
+
+.badge {
+  margin-inline-start: auto;
+  background: var(--warn);
+  color: #1a1206;
+  border-radius: 999px;
+  padding: 1px 7px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.sidebar-foot { margin-block-start: auto; }
+
+.lang-toggle {
+  inline-size: 100%;
+  padding: 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  cursor: pointer;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+}
+
+.lang-toggle:hover { color: var(--text); border-color: var(--accent-dim); }
+
+/* ------------------------------------------------------------------- main */
+
+.main { display: flex; flex-direction: column; min-inline-size: 0; }
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 16px 22px;
+  border-block-end: 1px solid var(--line);
+  background: var(--bg);
+}
+
+.page-title { font-size: 19px; font-weight: 650; margin: 0; }
+
+.topbar-actions {
+  margin-inline-start: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.search {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 0 10px;
+}
+
+.search:focus-within { border-color: var(--accent-dim); }
+.search-icon { color: var(--text-faint); font-size: 15px; }
+
+.search input {
+  background: none;
+  border: 0;
+  outline: none;
+  padding: 8px 2px;
+  inline-size: 230px;
+}
+
+.btn {
+  padding: 8px 15px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+  cursor: pointer;
+  font-weight: 600;
+  transition: background 0.12s, border-color 0.12s;
+}
+
+.btn:hover { background: var(--surface-3); }
+.btn:disabled { opacity: 0.5; cursor: default; }
+
+.btn-primary {
+  background: var(--accent-dim);
+  border-color: transparent;
+  color: #04120e;
+}
+
+.btn-primary:hover { background: var(--accent); }
+
+.btn-sm { padding: 5px 11px; font-size: 13px; }
+.btn-ghost { background: none; }
+
+.status {
+  padding: 9px 22px;
+  background: var(--surface-2);
+  border-block-end: 1px solid var(--line);
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+.status.is-error { color: var(--danger); }
+
+.view { flex: 1; overflow-y: auto; padding: 20px 22px 40px; }
+
+/* ------------------------------------------------------------- game cards */
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(178px, 1fr));
+  gap: 14px;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  transition: border-color 0.14s, transform 0.14s;
+}
+
+.card:hover { border-color: var(--accent-dim); transform: translateY(-2px); }
+
+/* Cover placeholder. With no metadata provider configured the hue is derived from the
+ * title, so a game keeps the same colour across sessions and stays recognisable. */
+.cover {
+  aspect-ratio: 5 / 6;
+  display: grid;
+  place-items: center;
+  padding: 14px;
+  text-align: center;
+  font-weight: 650;
+  font-size: 14px;
+  line-height: 1.35;
+  color: #fff;
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.5);
+  position: relative;
+}
+
+.cover.is-offline { filter: grayscale(0.75) brightness(0.7); }
+
+.card-body { padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 7px; }
+
+.card-title {
+  font-weight: 620;
+  line-height: 1.3;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--surface-3);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+/* A drive letter is a left-to-right token. Without isolation "C:\" renders as
+ * "\:C" inside the RTL layout. */
+.chip-drive {
+  background: rgba(61, 214, 176, 0.14);
+  color: var(--accent);
+  unicode-bidi: isolate;
+  direction: ltr;
+}
+.chip-offline { background: var(--surface-3); color: var(--text-faint); }
+.chip-warn { background: rgba(240, 180, 41, 0.15); color: var(--warn); }
+.chip-parts { background: rgba(120, 160, 255, 0.14); color: #8fb0ff; }
+
+/* ----------------------------------------------------------------- drives */
+
+.drive-list { display: flex; flex-direction: column; gap: 14px; }
+
+.drive {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 16px 18px;
+}
+
+.drive.is-offline { opacity: 0.82; border-style: dashed; }
+
+.drive-head {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  flex-wrap: wrap;
+}
+
+.drive-name { font-size: 16px; font-weight: 650; }
+
+.dot {
+  inline-size: 8px;
+  block-size: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex: none;
+}
+
+.dot.is-off { background: var(--text-faint); }
+
+.drive-sub {
+  margin-block-start: 5px;
+  font-size: 12.5px;
+  color: var(--text-faint);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.drive-actions { margin-inline-start: auto; display: flex; gap: 8px; }
+
+/* Capacity bar, segmented by what the catalogue found. */
+.bar {
+  margin-block-start: 13px;
+  block-size: 9px;
+  border-radius: 999px;
+  background: var(--surface-3);
+  overflow: hidden;
+  display: flex;
+}
+
+.bar-seg { block-size: 100%; }
+
+.legend {
+  margin-block-start: 9px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.legend-item { display: flex; align-items: center; gap: 6px; }
+
+.swatch { inline-size: 10px; block-size: 10px; border-radius: 3px; }
+
+.offline-note {
+  margin-block-start: 12px;
+  padding: 9px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  border-inline-start: 3px solid var(--text-faint);
+  font-size: 12.5px;
+  color: var(--text-dim);
+}
+
+/* ----------------------------------------------------------------- review */
+
+.review-card {
+  max-inline-size: 760px;
+  margin-inline: auto;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 22px;
+}
+
+.review-title { font-size: 21px; font-weight: 650; margin: 0 0 4px; }
+
+.reasons { margin-block-start: 16px; display: flex; flex-direction: column; gap: 7px; }
+
+.reason {
+  display: flex;
+  align-items: baseline;
+  gap: 11px;
+  padding: 8px 11px;
+  background: var(--surface-2);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+}
+
+.reason-delta { font-variant-numeric: tabular-nums; font-weight: 700; min-inline-size: 48px; }
+.reason-delta.pos { color: var(--accent); }
+.reason-delta.neg { color: var(--danger); }
+
+.review-actions { margin-block-start: 20px; display: flex; gap: 10px; flex-wrap: wrap; }
+
+.kbd {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--line);
+  background: var(--surface-3);
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-inline-start: 6px;
+}
+
+/* ------------------------------------------------------------------ table */
+
+.table { inline-size: 100%; border-collapse: collapse; font-size: 13px; }
+
+.table th {
+  text-align: start;
+  padding: 9px 12px;
+  color: var(--text-faint);
+  font-weight: 600;
+  border-block-end: 1px solid var(--line);
+  white-space: nowrap;
+}
+
+.table td { padding: 10px 12px; border-block-end: 1px solid var(--line); }
+.table tr:hover td { background: var(--surface); }
+.num { text-align: end; font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+/* A filesystem path is always left-to-right, even inside an RTL page and even when
+ * it contains Arabic segments. Without this, "E:\Game\سفرة إيران\x.THM" renders with
+ * its separators scrambled into an unreadable order. */
+.path {
+  direction: ltr;
+  unicode-bidi: bidi-override;
+  text-align: start;
+  font-family: "Cascadia Mono", Consolas, ui-monospace, monospace;
+  font-size: 11.5px;
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The review screen shows the exact location, so there the path may wrap. */
+.review-card .path {
+  white-space: normal;
+  word-break: break-all;
+  color: var(--text-dim);
+}
+
+html[dir="rtl"] .path { text-align: right; }
+
+.empty {
+  text-align: center;
+  padding: 70px 20px;
+  color: var(--text-faint);
+}
+
+.empty-title { font-size: 16px; color: var(--text-dim); margin-block-end: 6px; }
+
+.section-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-block: 4px 14px;
+}
+
+.section-head h2 { font-size: 15px; margin: 0; font-weight: 640; }
+.count-pill { color: var(--text-faint); font-size: 13px; }
+
+.dup-group {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  margin-block-end: 12px;
+}
+
+.filter-row { display: flex; gap: 8px; margin-block-end: 16px; flex-wrap: wrap; }
+
+.pill {
+  padding: 6px 13px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+.pill.is-active { background: var(--surface-3); color: var(--text); border-color: var(--accent-dim); }
+
+.spinner {
+  inline-size: 14px;
+  block-size: 14px;
+  border: 2px solid var(--line);
+  border-block-start-color: var(--accent);
+  border-radius: 50%;
+  display: inline-block;
+  animation: spin 0.7s linear infinite;
+  vertical-align: -2px;
+  margin-inline-end: 7px;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* --------------------------------------------------------------- overlays */
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(6, 9, 13, 0.72);
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  z-index: 50;
+  backdrop-filter: blur(2px);
+}
+
+.modal {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  inline-size: min(720px, 100%);
+  max-block-size: min(86vh, 900px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.modal-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 18px 20px 14px;
+  border-block-end: 1px solid var(--line);
+}
+
+.modal-title { font-size: 18px; font-weight: 650; margin: 0; line-height: 1.3; }
+.modal-body { padding: 18px 20px; overflow-y: auto; }
+
+.modal-foot {
+  display: flex;
+  gap: 10px;
+  padding: 14px 20px;
+  border-block-start: 1px solid var(--line);
+  background: var(--surface-2);
+}
+
+.modal-foot .spacer { margin-inline-start: auto; }
+
+.icon-btn {
+  margin-inline-start: auto;
+  background: none;
+  border: 0;
+  color: var(--text-faint);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 6px;
+  flex: none;
+}
+
+.icon-btn:hover { color: var(--text); background: var(--surface-3); }
+
+/* ------------------------------------------------------------------ forms */
+
+.field { margin-block-end: 16px; }
+
+.field-label {
+  display: block;
+  font-size: 12.5px;
+  color: var(--text-dim);
+  margin-block-end: 6px;
+  font-weight: 600;
+}
+
+.field select,
+.field input[type="text"] {
+  inline-size: 100%;
+  padding: 9px 11px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  outline: none;
+}
+
+.field select:focus,
+.field input[type="text"]:focus { border-color: var(--accent-dim); }
+
+.seg { display: flex; gap: 0; border: 1px solid var(--line); border-radius: var(--radius-sm); overflow: hidden; }
+
+.seg button {
+  flex: 1;
+  padding: 9px 10px;
+  background: var(--surface-2);
+  border: 0;
+  cursor: pointer;
+  color: var(--text-dim);
+  border-inline-end: 1px solid var(--line);
+  font-size: 13px;
+}
+
+.seg button:last-child { border-inline-end: 0; }
+.seg button.is-active { background: var(--surface-3); color: var(--text); font-weight: 600; }
+.seg button.is-danger.is-active { background: rgba(242, 104, 107, 0.2); color: var(--danger); }
+
+.switch { display: flex; align-items: center; gap: 10px; cursor: pointer; }
+.switch input { inline-size: 16px; block-size: 16px; accent-color: var(--accent-dim); }
+.switch-note { font-size: 12px; color: var(--text-faint); margin-block-start: 4px; }
+
+/* --------------------------------------------------------- preflight, jobs */
+
+.notice {
+  padding: 10px 13px;
+  border-radius: var(--radius-sm);
+  margin-block-end: 9px;
+  font-size: 13px;
+  border-inline-start: 3px solid;
+  line-height: 1.5;
+}
+
+.notice-problem { background: rgba(242, 104, 107, 0.1); border-color: var(--danger); color: #ffb3b5; }
+.notice-warn { background: rgba(240, 180, 41, 0.1); border-color: var(--warn); color: #ffd98a; }
+.notice-info { background: var(--surface-2); border-color: var(--accent-dim); color: var(--text-dim); }
+
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 6px 16px; font-size: 13px; }
+.kv dt { color: var(--text-faint); }
+.kv dd { margin: 0; font-variant-numeric: tabular-nums; }
+
+.job {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 15px 17px;
+  margin-block-end: 12px;
+}
+
+.job.is-done { border-color: var(--accent-dim); }
+.job.is-failed { border-color: var(--danger); }
+
+.job-head { display: flex; align-items: center; gap: 10px; margin-block-end: 10px; flex-wrap: wrap; }
+.job-title { font-weight: 640; }
+.job-actions { margin-inline-start: auto; display: flex; gap: 8px; }
+
+.progress {
+  block-size: 7px;
+  border-radius: 999px;
+  background: var(--surface-3);
+  overflow: hidden;
+}
+
+.progress-fill {
+  block-size: 100%;
+  background: var(--accent);
+  transition: inline-size 0.2s linear;
+}
+
+.progress-fill.is-done { background: var(--accent-dim); }
+.progress-fill.is-failed { background: var(--danger); }
+
+.job-stats {
+  margin-block-start: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.file-list { margin-block-start: 6px; max-block-size: 220px; overflow-y: auto; }
+
+.file-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 9px;
+  border-radius: 6px;
+  font-size: 12.5px;
+}
+
+.file-row:nth-child(odd) { background: var(--surface-2); }
+.file-row .num { margin-inline-start: auto; color: var(--text-dim); }
+
+.part-no {
+  inline-size: 22px;
+  block-size: 22px;
+  display: grid;
+  place-items: center;
+  border-radius: 6px;
+  background: var(--surface-3);
+  font-size: 11px;
+  color: var(--text-dim);
+  flex: none;
+}
+
+.card { cursor: pointer; }
+
+/* Real artwork replaces the generated placeholder at the same aspect ratio, so the
+ * grid does not reflow as covers arrive. */
+.cover-img { object-fit: cover; inline-size: 100%; display: block; }
+
+.steps {
+  margin: 12px 0 18px;
+  padding-inline-start: 20px;
+  color: var(--text-dim);
+  font-size: 13px;
+  line-height: 1.8;
+}
+
+.steps code { color: var(--accent); }

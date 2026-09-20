@@ -1,0 +1,6 @@
+# Pinned to the channel installed on this machine (currently 1.98.1).
+# Using "stable" rather than an exact version avoids rustup trying to fetch a
+# version-specific channel manifest, which fails on restricted networks.
+[toolchain]
+channel = "stable"
+targets = ["x86_64-pc-windows-msvc"]

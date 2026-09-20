@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GameVault</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div id="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <svg viewBox="0 0 24 24" aria-hidden="true" class="brand-mark">
+        <path d="M4 7h16v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7Z"/>
+        <path d="M4 7l2-3h12l2 3"/>
+        <circle cx="12" cy="13" r="2.5"/>
+      </svg>
+      <span>GameVault</span>
+    </div>
+
+    <nav class="nav">
+      <button class="nav-item is-active" data-route="library" type="button">
+        <span class="nav-icon" aria-hidden="true">▦</span><span data-i18n="nav.library"></span>
+      </button>
+      <button class="nav-item" data-route="drives" type="button">
+        <span class="nav-icon" aria-hidden="true">⛁</span><span data-i18n="nav.drives"></span>
+      </button>
+      <button class="nav-item" data-route="review" type="button">
+        <span class="nav-icon" aria-hidden="true">?</span><span data-i18n="nav.review"></span>
+        <span class="badge" id="review-count" hidden></span>
+      </button>
+      <button class="nav-item" data-route="filtered" type="button">
+        <span class="nav-icon" aria-hidden="true">⊘</span><span data-i18n="nav.filtered"></span>
+      </button>
+      <button class="nav-item" data-route="transfers" type="button">
+        <span class="nav-icon" aria-hidden="true">⇄</span><span data-i18n="nav.transfers"></span>
+        <span class="badge" id="transfer-count" hidden></span>
+      </button>
+      <button class="nav-item" data-route="duplicates" type="button">
+        <span class="nav-icon" aria-hidden="true">⧉</span><span data-i18n="nav.duplicates"></span>
+      </button>
+      <button class="nav-item" data-route="storage" type="button">
+        <span class="nav-icon" aria-hidden="true">▤</span><span data-i18n="nav.storage"></span>
+      </button>
+      <button class="nav-item" data-route="settings" type="button">
+        <span class="nav-icon" aria-hidden="true">⚙</span><span data-i18n="nav.settings"></span>
+      </button>
+    </nav>
+
+    <div class="sidebar-foot">
+      <button id="lang-toggle" class="lang-toggle" type="button" title="العربية / English">
+        <span id="lang-label">EN</span>
+      </button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <h1 id="page-title" class="page-title"></h1>
+      <div class="topbar-actions">
+        <label class="search">
+          <span class="search-icon" aria-hidden="true">⌕</span>
+          <input id="search" type="search" data-i18n-ph="search.placeholder" autocomplete="off">
+        </label>
+        <button id="scan-btn" class="btn btn-primary" type="button" data-i18n="action.scan"></button>
+      </div>
+    </header>
+
+    <div id="status" class="status" hidden></div>
+    <section id="view" class="view"></section>
+  </main>
+</div>
+
+<script src="i18n.js"></script>
+<script src="detail.js"></script>
+<script src="settings.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
