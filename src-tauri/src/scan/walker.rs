@@ -46,9 +46,20 @@ fn is_real_os_dir(dir: &Path, name_lower: &str) -> bool {
     }
 }
 
+/// True when a directory should never be descended into.
+///
+/// Shared so the live console read prunes exactly what the scanner prunes: two lists that
+/// drifted apart would mean the Game Files window and the library disagreed about what is
+/// even on the drive. `dir` is needed because the OS-directory names are ordinary folder
+/// names on a data drive, and are pruned only when the directory really is a system one.
+pub fn is_pruned_dir(dir: &Path, name_lower: &str) -> bool {
+    PRUNE_DIRS.contains(&name_lower)
+        || (OS_DIR_NAMES.contains(&name_lower) && is_real_os_dir(dir, name_lower))
+}
+
 /// Maximum directory depth below a scan root. Games are never nested deeper than this,
 /// and the bound keeps a pathological tree from stalling a scan.
-const MAX_DEPTH: usize = 6;
+pub const MAX_DEPTH: usize = 6;
 
 /// Depth below an item at which marker files are still collected.
 const MARKER_DEPTH: usize = 4;
@@ -189,13 +200,7 @@ pub fn scan(root: &Path, cfg: &ClassifyConfig) -> ScanResult {
                     return true;
                 }
                 let name = e.file_name().to_string_lossy().to_lowercase();
-                if PRUNE_DIRS.contains(&name.as_str()) {
-                    return false;
-                }
-                if OS_DIR_NAMES.contains(&name.as_str()) && is_real_os_dir(&e.path(), &name) {
-                    return false;
-                }
-                true
+                !is_pruned_dir(&e.path(), &name)
             });
         });
 

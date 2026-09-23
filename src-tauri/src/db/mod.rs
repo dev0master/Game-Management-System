@@ -10,8 +10,10 @@
 
 use crate::platform::volume::VolumeInfo;
 use crate::scan::classify::Verdict;
+use crate::scan::console::ProbeRow;
 use crate::scan::walker::ScannedItem;
 use rusqlite::{params, Connection, OptionalExtension};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 pub mod time;
@@ -75,6 +77,30 @@ pub struct ItemRow {
     pub cover_path: Option<String>,
     pub matched_name: Option<String>,
     pub match_locked: bool,
+}
+
+/// One metadata match, as `save_metadata` stores it.
+///
+/// A struct rather than a parameter list: there were already a dozen arguments, most of
+/// them `Option`, and at that width a transposed pair compiles cleanly and quietly writes
+/// the wrong column.
+#[derive(Debug, Clone, Default)]
+pub struct MetaRecord<'a> {
+    pub item_id: i64,
+    /// `rawg` | `igdb` | `manual` | `none`
+    pub source: &'a str,
+    pub rawg_id: Option<i64>,
+    pub igdb_id: Option<i64>,
+    pub steam_appid: Option<i64>,
+    pub matched_name: &'a str,
+    pub match_score: f64,
+    pub year: Option<i32>,
+    pub summary: Option<&'a str>,
+    pub genres: &'a [String],
+    pub rating: Option<f64>,
+    pub cover_path: Option<&'a str>,
+    /// Set only by explicit user action; enrichment never passes true.
+    pub locked: bool,
 }
 
 /// Filter for a library query.
@@ -325,6 +351,108 @@ impl Db {
         )?;
         tx.commit()?;
         Ok((items.len(), new_count, missing))
+    }
+
+    /// Every cached package probe for one drive, keyed on path relative to the drive root.
+    ///
+    /// This is a cache, never a source of truth: the Game Files window reads the folder
+    /// live, and a row here only spares it reopening a file that has not changed.
+    pub fn load_console_probes(&self, drive_id: i64) -> Result<HashMap<String, ProbeRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT rel_path, size_bytes, mtime_unix, platform, status, title_id, content_id,
+                    category, title, app_ver, system_ver, declared_bytes, content_type
+               FROM console_probe WHERE drive_id = ?1",
+        )?;
+        let rows = stmt.query_map(params![drive_id], |r| {
+            let rel_path: String = r.get(0)?;
+            let size_bytes: i64 = r.get(1)?;
+            let declared: Option<i64> = r.get(11)?;
+            let system_ver: Option<i64> = r.get(10)?;
+            let content_type: Option<i64> = r.get(12)?;
+            Ok((
+                rel_path.clone(),
+                ProbeRow {
+                    // The probe layer works within one directory, so it wants the bare
+                    // filename; `index` re-keys by relative path on the way in.
+                    name: rel_path
+                        .rsplit_once('\\')
+                        .map(|(_, n)| n.to_string())
+                        .unwrap_or(rel_path),
+                    size_bytes: size_bytes.max(0) as u64,
+                    mtime_unix: r.get(2)?,
+                    platform: r.get(3)?,
+                    status: r.get(4)?,
+                    title_id: r.get(5)?,
+                    content_id: r.get(6)?,
+                    category: r.get(7)?,
+                    title: r.get(8)?,
+                    app_ver: r.get(9)?,
+                    system_ver: system_ver.map(|v| v as u32),
+                    declared_bytes: declared.map(|v| v.max(0) as u64),
+                    content_type: content_type.map(|v| v as u32),
+                },
+            ))
+        })?;
+
+        let mut out = HashMap::new();
+        for row in rows {
+            let (k, v) = row?;
+            out.insert(k, v);
+        }
+        Ok(out)
+    }
+
+    /// Store probes done during a read. `keyed` pairs each row with its path relative to
+    /// the drive root, which together with the drive is the cache key.
+    ///
+    /// Rows for files that have since vanished are left alone. They cost a few bytes and
+    /// are what makes a drive that gets unplugged and reconnected instant again.
+    pub fn save_console_probes(
+        &mut self,
+        drive_id: i64,
+        keyed: &[(String, ProbeRow)],
+    ) -> Result<usize> {
+        if keyed.is_empty() {
+            return Ok(0);
+        }
+        let now = time::now_utc();
+        let tx = self.conn.transaction()?;
+        for (rel_path, p) in keyed {
+            tx.execute(
+                "INSERT INTO console_probe
+                   (drive_id, rel_path, size_bytes, mtime_unix, platform, status, title_id,
+                    content_id, category, title, app_ver, system_ver, declared_bytes,
+                    content_type, cover_cache, probed_utc)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,NULL,?15)
+                 ON CONFLICT(drive_id, rel_path) DO UPDATE SET
+                    size_bytes=excluded.size_bytes, mtime_unix=excluded.mtime_unix,
+                    platform=excluded.platform, status=excluded.status,
+                    title_id=excluded.title_id, content_id=excluded.content_id,
+                    category=excluded.category, title=excluded.title,
+                    app_ver=excluded.app_ver, system_ver=excluded.system_ver,
+                    declared_bytes=excluded.declared_bytes,
+                    content_type=excluded.content_type, probed_utc=excluded.probed_utc",
+                params![
+                    drive_id,
+                    rel_path,
+                    p.size_bytes as i64,
+                    p.mtime_unix,
+                    p.platform,
+                    p.status,
+                    p.title_id,
+                    p.content_id,
+                    p.category,
+                    p.title,
+                    p.app_ver,
+                    p.system_ver.map(|v| v as i64),
+                    p.declared_bytes.map(|v| v as i64),
+                    p.content_type.map(|v| v as i64),
+                    now,
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(keyed.len())
     }
 
     /// Every known drive, attached or not, newest activity first.
@@ -604,30 +732,15 @@ impl Db {
     }
 
     /// Record a metadata match.
-    #[allow(clippy::too_many_arguments)]
-    pub fn save_metadata(
-        &mut self,
-        item_id: i64,
-        source: &str,
-        igdb_id: Option<i64>,
-        steam_appid: Option<i64>,
-        matched_name: &str,
-        match_score: f64,
-        year: Option<i32>,
-        summary: Option<&str>,
-        genres: &[String],
-        rating: Option<f64>,
-        cover_path: Option<&str>,
-        locked: bool,
-    ) -> Result<()> {
+    pub fn save_metadata(&mut self, m: &MetaRecord<'_>) -> Result<()> {
         let now = time::now_utc();
         self.conn.execute(
-            "INSERT INTO metadata (item_id, source, igdb_id, steam_appid, matched_name,
+            "INSERT INTO metadata (item_id, source, rawg_id, igdb_id, steam_appid, matched_name,
                 match_score, match_locked, summary, release_year, genres_json, rating,
                 cover_path, fetched_utc)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
              ON CONFLICT(item_id) DO UPDATE SET
-                source=excluded.source, igdb_id=excluded.igdb_id,
+                source=excluded.source, rawg_id=excluded.rawg_id, igdb_id=excluded.igdb_id,
                 steam_appid=excluded.steam_appid, matched_name=excluded.matched_name,
                 match_score=excluded.match_score, match_locked=excluded.match_locked,
                 summary=excluded.summary, release_year=excluded.release_year,
@@ -635,17 +748,17 @@ impl Db {
                 cover_path=COALESCE(excluded.cover_path, metadata.cover_path),
                 fetched_utc=excluded.fetched_utc",
             params![
-                item_id, source, igdb_id, steam_appid, matched_name, match_score,
-                locked as i64, summary, year,
-                serde_json::to_string(genres).unwrap_or_else(|_| "[]".into()),
-                rating, cover_path, now
+                m.item_id, m.source, m.rawg_id, m.igdb_id, m.steam_appid, m.matched_name,
+                m.match_score, m.locked as i64, m.summary, m.year,
+                serde_json::to_string(m.genres).unwrap_or_else(|_| "[]".into()),
+                m.rating, m.cover_path, now
             ],
         )?;
         // Keep the appid on the item too, so duplicate detection can use it later.
-        if let Some(appid) = steam_appid {
+        if let Some(appid) = m.steam_appid {
             self.conn.execute(
                 "UPDATE item SET steam_appid = ?1 WHERE id = ?2",
-                params![appid, item_id],
+                params![appid, m.item_id],
             )?;
         }
         Ok(())
@@ -676,7 +789,7 @@ impl Db {
 }
 
 /// The schema version this build expects.
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 3;
 
 /// Bring an existing catalogue up to [`SCHEMA_VERSION`].
 ///
@@ -689,6 +802,9 @@ fn migrate(conn: &Connection) -> Result<()> {
     if version >= SCHEMA_VERSION {
         return Ok(());
     }
+    // Version 2 re-ran the adds below on databases that reached version 1 without them;
+    // version 3 adds metadata.rawg_id. The whole block is idempotent, so re-running costs
+    // nothing and every version simply replays it.
 
     // Adding a column that is already present is not an error worth failing on: a
     // freshly created database already has them from schema.sql.
@@ -709,6 +825,15 @@ fn migrate(conn: &Connection) -> Result<()> {
     ] {
         add("item_file", col, ty);
     }
+    // The metadata provider is RAWG, whose ids are its own.
+    add("metadata", "rawg_id", "INTEGER");
+
+    // Indexes over the columns just added. These cannot live in `schema.sql`: that batch
+    // runs before this function, so on a database predating the console columns it would
+    // abort on the missing column and the app could not open its own catalogue at all.
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS ix_item_titleid ON item(platform, title_id);",
+    )?;
 
     conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
     Ok(())
@@ -810,6 +935,185 @@ mod tests {
             free_bytes: 300_000_000_000,
             is_unjournaled: true,
             max_file_bytes: None,
+        }
+    }
+
+    /// The probe cache must survive a round trip intact, including the filename the probe
+    /// layer keys on. Without that, every read would reprobe and reading live would be too
+    /// slow to use.
+    #[test]
+    fn console_probes_round_trip_and_are_scoped_to_their_drive() {
+        let mut db = Db::open_in_memory().unwrap();
+        let a = db.upsert_drive(&vol("{a}", "AAAA", "Drive A")).unwrap();
+        let b = db.upsert_drive(&vol("{b}", "BBBB", "Drive B")).unwrap();
+
+        let row = ProbeRow {
+            name: "metro.pkg".into(),
+            size_bytes: 48_000_000_000,
+            mtime_unix: 1_700_000_000,
+            platform: "ps4".into(),
+            status: "ok".into(),
+            title_id: Some("CUSA11407".into()),
+            content_id: Some("EP4062-CUSA11407_00-METROEXODUS00000".into()),
+            category: Some("gd".into()),
+            title: Some("Metro Exodus".into()),
+            app_ver: Some("01.00".into()),
+            system_ver: Some(0x0470_0000),
+            declared_bytes: Some(48_000_000_000),
+            content_type: Some(0x1A),
+        };
+        let stored = vec![(r"Games\PS4\metro.pkg".to_string(), row.clone())];
+        assert_eq!(db.save_console_probes(a, &stored).unwrap(), 1);
+
+        let back = db.load_console_probes(a).unwrap();
+        let got = back.get(r"Games\PS4\metro.pkg").expect("stored under its relative path");
+        // The key carries the folder; the row carries the bare filename the prober needs.
+        assert_eq!(got.name, "metro.pkg");
+        assert_eq!(got.size_bytes, row.size_bytes);
+        assert_eq!(got.mtime_unix, row.mtime_unix);
+        assert_eq!(got.title.as_deref(), Some("Metro Exodus"));
+        assert_eq!(got.system_ver, Some(0x0470_0000));
+        assert_eq!(got.declared_bytes, row.declared_bytes);
+        assert_eq!(got.content_type, Some(0x1A));
+
+        // A second drive must not see the first one's probes.
+        assert!(db.load_console_probes(b).unwrap().is_empty());
+
+        // Re-probing the same path replaces the row rather than adding one.
+        let mut changed = row.clone();
+        changed.size_bytes += 1;
+        changed.title = Some("Metro Exodus Gold".into());
+        db.save_console_probes(a, &[(r"Games\PS4\metro.pkg".to_string(), changed)]).unwrap();
+        let back = db.load_console_probes(a).unwrap();
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[r"Games\PS4\metro.pkg"].title.as_deref(), Some("Metro Exodus Gold"));
+    }
+
+    /// A catalogue created before the console columns existed must still open.
+    ///
+    /// This is a regression test for a real failure: `schema.sql` carried
+    /// `CREATE INDEX ... ON item(platform, title_id)`, that batch runs before `migrate()`,
+    /// and on an older database the column did not exist yet — so the batch aborted, and
+    /// the app refused to open its own catalogue with 114 items already in it. Indexes over
+    /// migrated columns therefore belong in `migrate()`, after the ALTERs.
+    #[test]
+    fn a_catalogue_predating_the_console_columns_still_opens() {
+        let dir = std::env::temp_dir().join(format!(
+            "gv_oldschema_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("catalog.db");
+
+        // Reproduce the state a real older catalogue is in, rather than approximating it:
+        // build a current one, put an item in it, then take the console columns back off
+        // and reset the version. That is byte-for-byte the situation found on the machine
+        // this test was written for.
+        const CONSOLE_ITEM_COLS: [&str; 8] = [
+            "platform", "title_id", "content_id", "group_role", "min_system_ver",
+            "max_system_ver", "base_title_id", "link_reason",
+        ];
+        const CONSOLE_FILE_COLS: [&str; 5] =
+            ["content_id", "app_ver", "system_ver", "declared_bytes", "probe_status"];
+        {
+            let mut fresh = Db::open(&path).unwrap();
+            let drive_id = fresh.upsert_drive(&vol("{old}", "OLD1", "Old Drive")).unwrap();
+            fresh
+                .record_scan(drive_id, &[item("Games\\A", "A Game", 1024, Verdict::Game)])
+                .unwrap();
+
+            // Triggers reference item columns, so they have to go before the columns do.
+            fresh
+                .conn
+                .execute_batch(
+                    "DROP TRIGGER IF EXISTS item_ai;
+                     DROP TRIGGER IF EXISTS item_ad;
+                     DROP TRIGGER IF EXISTS item_au;
+                     DROP INDEX IF EXISTS ix_item_titleid;",
+                )
+                .unwrap();
+            for c in CONSOLE_ITEM_COLS {
+                fresh
+                    .conn
+                    .execute_batch(&format!("ALTER TABLE item DROP COLUMN {c}"))
+                    .unwrap_or_else(|e| panic!("dropping item.{c}: {e}"));
+            }
+            for c in CONSOLE_FILE_COLS {
+                fresh
+                    .conn
+                    .execute_batch(&format!("ALTER TABLE item_file DROP COLUMN {c}"))
+                    .unwrap_or_else(|e| panic!("dropping item_file.{c}: {e}"));
+            }
+            fresh.conn.execute_batch("PRAGMA user_version = 0").unwrap();
+        }
+
+        // The whole point: this used to fail outright.
+        let db = Db::open(&path).expect("an older catalogue must still open");
+
+        let cols: Vec<String> = db
+            .conn
+            .prepare("SELECT name FROM pragma_table_info('item')")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_>>()
+            .unwrap();
+        for want in [
+            "platform", "title_id", "content_id", "group_role", "min_system_ver",
+            "max_system_ver", "base_title_id", "link_reason",
+        ] {
+            assert!(cols.iter().any(|c| c == want), "migrate must add item.{want}");
+        }
+        for want in ["content_id", "app_ver", "system_ver", "declared_bytes", "probe_status"] {
+            let fcols: Vec<String> = db
+                .conn
+                .prepare("SELECT name FROM pragma_table_info('item_file')")
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<_>>()
+                .unwrap();
+            assert!(fcols.iter().any(|c| c == want), "migrate must add item_file.{want}");
+        }
+
+        // The index that caused the failure is created, now that the column exists.
+        let idx: i64 = db
+            .conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='index' AND name='ix_item_titleid'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx, 1, "the index is created after the columns, not before");
+
+        // Nothing the user had was lost on the way.
+        let rows: i64 = db.conn.query_row("SELECT count(*) FROM item", [], |r| r.get(0)).unwrap();
+        assert_eq!(rows, 1, "existing items survive the migration");
+
+        // Opening twice must be a no-op, not a second migration.
+        drop(db);
+        let again = Db::open(&path).expect("reopening is idempotent");
+        let v: i64 = again.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, SCHEMA_VERSION);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A status that is not recognised must never read back as a healthy package.
+    #[test]
+    fn an_unknown_probe_status_reads_back_as_unreadable() {
+        use crate::scan::console::group::ProbeStatus;
+        assert_eq!(ProbeStatus::parse("ok"), ProbeStatus::Ok);
+        assert_eq!(ProbeStatus::parse("not_pkg"), ProbeStatus::NotPkg);
+        assert_eq!(ProbeStatus::parse("continuation"), ProbeStatus::Continuation);
+        assert_eq!(ProbeStatus::parse("something new"), ProbeStatus::Unreadable);
+        for st in [ProbeStatus::Ok, ProbeStatus::NotPkg, ProbeStatus::Continuation, ProbeStatus::Unreadable] {
+            assert_eq!(ProbeStatus::parse(st.as_str()), st, "{st:?} round-trips");
         }
     }
 

@@ -20,10 +20,13 @@ async function renderSettings() {
     return;
   }
 
-  const idInput = h('input', { type: 'text', value: status.client_id || '', placeholder: 'Client ID' });
-  const secretInput = h('input', {
+  // One field: RAWG authenticates with a single key on the query string. The stored key
+  // is never sent back to the page, so the placeholder shows only its last four
+  // characters — enough to recognise which key is saved.
+  const keyInput = h('input', {
     type: 'text',
-    placeholder: status.has_credentials ? '••••••••  ' + t('msg.secretStored') : 'Client Secret',
+    dir: 'ltr',
+    placeholder: status.has_credentials ? `${status.key_hint}  ${t('msg.keyStored')}` : 'RAWG API key',
   });
   const result = h('div', {});
 
@@ -34,11 +37,9 @@ async function renderSettings() {
       saveBtn.disabled = true;
       result.replaceChildren(h('div', { class: 'notice notice-info' }, h('span', { class: 'spinner' }), t('msg.checking')));
       try {
-        await invoke('save_credentials', {
-          args: { client_id: idInput.value, client_secret: secretInput.value },
-        });
+        await invoke('save_credentials', { args: { api_key: keyInput.value } });
         result.replaceChildren(h('div', { class: 'notice notice-info', text: t('msg.credsOk') }));
-        secretInput.value = '';
+        keyInput.value = '';
         renderSettings();
       } catch (e) {
         result.replaceChildren(h('div', { class: 'notice notice-problem', text: String(e?.message || e) }));
@@ -46,6 +47,9 @@ async function renderSettings() {
         saveBtn.disabled = false;
       }
     },
+  });
+  keyInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') saveBtn.click();
   });
 
   const enrichBtn = h('button', {
@@ -94,13 +98,11 @@ async function renderSettings() {
       h('h2', { class: 'review-title', text: t('title.metadata') }),
       h('div', { class: 'notice notice-info', text: t('msg.metadataExplain') }),
       h('ol', { class: 'steps' },
-        h('li', {}, t('msg.step1'), ' ', h('code', { class: 'path', text: 'dev.twitch.tv/console/apps' })),
+        h('li', {}, t('msg.step1'), ' ', h('code', { class: 'path', text: 'rawg.io/apidocs' })),
         h('li', { text: t('msg.step2') }),
         h('li', { text: t('msg.step3') })),
       h('div', { class: 'field' },
-        h('span', { class: 'field-label', text: 'Twitch Client ID' }), idInput),
-      h('div', { class: 'field' },
-        h('span', { class: 'field-label', text: 'Twitch Client Secret' }), secretInput,
+        h('span', { class: 'field-label', text: t('label.apiKey') }), keyInput,
         h('div', { class: 'switch-note', text: t('msg.secretNote') })),
       h('div', { class: 'review-actions' },
         saveBtn,
@@ -125,6 +127,83 @@ async function renderSettings() {
         `${t('label.coverFolder')}: `),
       h('div', { class: 'path', text: status.cover_dir }),
     ),
+    resetCard(),
+  );
+}
+
+/* Clearing everything the app has stored.
+ *
+ * Kept visually apart and behind a confirmation because it cannot be undone. The copy
+ * states what is removed and, just as importantly, what is not: the catalogue describes
+ * the drives, and deleting a description cannot delete what it describes. */
+function resetCard() {
+  const result = h('div', {});
+
+  const doReset = async () => {
+    try {
+      const s = await invoke('reset_app_data', { confirm: 'RESET-EVERYTHING' });
+      // The window's own remembered state goes too, or the next render would reopen a
+      // folder the catalogue no longer knows about.
+      try {
+        localStorage.removeItem('gv.gamefiles.root');
+      } catch {
+        /* Blocked storage: nothing was remembered anyway. */
+      }
+      if (typeof gfState === 'object') {
+        gfState.root = null;
+        gfState.data = null;
+        gfState.platform = null;
+      }
+      state.items = [];
+      await loadDrives();
+      await updateReviewBadge();
+      setStatus(
+        `${t('msg.resetDone')} — ${fmtNum(s.covers_removed)} ${t('label.covers')}, ${fmtBytes(s.bytes_freed)}`,
+      );
+      renderSettings();
+    } catch (e) {
+      result.replaceChildren(h('div', { class: 'notice notice-problem', text: String(e?.message || e) }));
+    }
+  };
+
+  const confirmBtn = h('button', {
+    class: 'btn btn-danger',
+    text: t('action.resetConfirm'),
+    onclick: () => {
+      const { close } = modal(
+        t('title.reset'),
+        h(
+          'div',
+          {},
+          h('div', { class: 'notice notice-problem', text: t('msg.resetWarn') }),
+          h('ul', { class: 'steps' },
+            h('li', { text: t('msg.resetItem1') }),
+            h('li', { text: t('msg.resetItem2') }),
+            h('li', { text: t('msg.resetItem3') })),
+          h('div', { class: 'notice notice-info', text: t('msg.resetSafe') }),
+        ),
+        [
+          h('button', { class: 'btn', text: t('action.cancel'), onclick: () => close() }),
+          h('button', {
+            class: 'btn btn-danger',
+            text: t('action.resetConfirm'),
+            onclick: () => {
+              close();
+              doReset();
+            },
+          }),
+        ],
+      );
+    },
+  });
+
+  return h(
+    'div',
+    { class: 'review-card is-danger', style: 'margin-block-start:16px' },
+    h('h2', { class: 'review-title', text: t('title.reset') }),
+    h('div', { class: 'switch-note', text: t('msg.resetExplain') }),
+    h('div', { class: 'review-actions', style: 'margin-block-start:12px' }, confirmBtn),
+    result,
   );
 }
 

@@ -5,7 +5,8 @@
 //! the normal state until the user supplies credentials.
 
 use super::{AppState, CmdError, CmdResult};
-use crate::meta::igdb;
+use crate::db::MetaRecord;
+use crate::meta::rawg;
 use crate::platform::dpapi::{self, Credentials};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -27,7 +28,9 @@ pub fn cover_dir() -> PathBuf {
 #[derive(Debug, Serialize)]
 pub struct CredentialStatus {
     pub has_credentials: bool,
-    pub client_id: String,
+    /// The stored key, masked. Never the key itself: returning it would put the secret
+    /// back into webview memory and into every IPC log for no benefit.
+    pub key_hint: String,
     pub pending_count: i64,
     pub cover_dir: String,
 }
@@ -41,7 +44,7 @@ pub async fn credential_status(state: State<'_, AppState>) -> CmdResult<Credenti
     };
     Ok(CredentialStatus {
         has_credentials: creds.is_complete(),
-        client_id: creds.twitch_client_id,
+        key_hint: creds.masked(),
         pending_count: pending,
         cover_dir: cover_dir().to_string_lossy().into_owned(),
     })
@@ -49,19 +52,15 @@ pub async fn credential_status(state: State<'_, AppState>) -> CmdResult<Credenti
 
 #[derive(Debug, Deserialize)]
 pub struct CredentialArgs {
-    pub client_id: String,
-    pub client_secret: String,
+    pub api_key: String,
 }
 
 /// Save credentials and verify them in one step, so the user learns immediately
 /// whether they work rather than at the next enrichment run.
 #[tauri::command]
 pub async fn save_credentials(args: CredentialArgs) -> CmdResult<()> {
-    let creds = Credentials {
-        twitch_client_id: args.client_id.trim().to_string(),
-        twitch_client_secret: args.client_secret.trim().to_string(),
-    };
-    igdb::test_credentials(&creds).map_err(CmdError::from)?;
+    let creds = Credentials { rawg_api_key: args.api_key.trim().to_string() };
+    rawg::test_credentials(&creds).map_err(CmdError::from)?;
     dpapi::save_credentials(&creds).map_err(CmdError::from)?;
     Ok(())
 }
@@ -94,7 +93,7 @@ pub async fn enrich_library(
     let creds = dpapi::load_credentials();
     if !creds.is_complete() {
         return Err(CmdError::from(
-            "no credentials saved — add a Twitch Client ID and Secret in Settings",
+            "no API key saved — add a free RAWG key in Settings",
         ));
     }
 
@@ -126,9 +125,9 @@ pub async fn enrich_library(
                 },
             );
 
-            // IGDB is rate limited, so a failure on one title must not abort the run;
+            // RAWG is rate limited, so a failure on one title must not abort the run;
             // the next attempt simply picks it up again.
-            let found = match igdb::lookup(&creds, &title, year.map(|y| y as i32)) {
+            let found = match rawg::lookup(&creds, &title, year.map(|y| y as i32)) {
                 Ok(v) => v,
                 Err(e) => {
                     let _ = app.emit(
@@ -150,34 +149,30 @@ pub async fn enrich_library(
             let Some(meta) = found else { continue };
             matched += 1;
 
-            // The cover comes from Steam's CDN, reached via the app id IGDB supplies.
-            let cover_path = meta.cover_url.as_ref().and_then(|url| {
-                let key = meta.steam_appid.map(|a| a.to_string()).unwrap_or_else(|| format!("igdb{}", meta.igdb_id.unwrap_or(0)));
-                match igdb::download_image(url, &dir, &key) {
-                    Ok(p) => {
-                        covers += 1;
-                        Some(p.to_string_lossy().into_owned())
-                    }
-                    Err(_) => None, // No artwork is not an error worth stopping for.
-                }
+            // Steam's portrait box art when RAWG says the game is there, RAWG's own
+            // landscape art otherwise. No artwork is not an error worth stopping for.
+            let cover_path = rawg::fetch_cover(&meta, &dir).map(|p| {
+                covers += 1;
+                p.to_string_lossy().into_owned()
             });
 
             if let Some(state) = app.try_state::<AppState>() {
                 if let Ok(mut db) = state.db.lock() {
-                    let _ = db.save_metadata(
+                    let _ = db.save_metadata(&MetaRecord {
                         item_id,
-                        "igdb",
-                        meta.igdb_id,
-                        meta.steam_appid,
-                        &meta.name,
-                        meta.match_score,
-                        meta.year,
-                        meta.summary.as_deref(),
-                        &meta.genres,
-                        meta.rating,
-                        cover_path.as_deref(),
-                        false,
-                    );
+                        source: "rawg",
+                        rawg_id: meta.rawg_id,
+                        igdb_id: None,
+                        steam_appid: meta.steam_appid,
+                        matched_name: &meta.name,
+                        match_score: meta.match_score,
+                        year: meta.year,
+                        summary: meta.summary.as_deref(),
+                        genres: &meta.genres,
+                        rating: meta.rating,
+                        cover_path: cover_path.as_deref(),
+                        locked: false,
+                    });
                 }
             }
         }

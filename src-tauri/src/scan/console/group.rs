@@ -19,9 +19,66 @@ use std::sync::LazyLock;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Platform {
+    Ps1,
+    Ps2,
+    Ps3,
     Ps4,
-    Xbox360,
+    Ps5,
+    Psp,
+    PsVita,
     XboxOriginal,
+    Xbox360,
+    XboxSeries,
+    /// A console file we can see but cannot attribute. Shown as itself rather than hidden.
+    Unknown,
+}
+
+impl Platform {
+    /// The value stored in `item.platform` and sent to the UI, per `schema.sql`.
+    pub fn as_slug(self) -> &'static str {
+        match self {
+            Platform::Ps1 => "ps1",
+            Platform::Ps2 => "ps2",
+            Platform::Ps3 => "ps3",
+            Platform::Ps4 => "ps4",
+            Platform::Ps5 => "ps5",
+            Platform::Psp => "psp",
+            Platform::PsVita => "psvita",
+            Platform::XboxOriginal => "xbox",
+            Platform::Xbox360 => "xbox360",
+            Platform::XboxSeries => "xboxseries",
+            Platform::Unknown => "unknown",
+        }
+    }
+
+    /// Recognise a platform from a folder name.
+    ///
+    /// A bare `.iso` or `.bin` carries no platform marker in its header that can be read
+    /// without walking the disc filesystem, but people almost always file them under a
+    /// folder that says which console they are for. Using that is a stated guess, not a
+    /// claim — and it beats labelling half a library "unknown".
+    pub fn from_folder_name(name: &str) -> Option<Self> {
+        let n: String = name
+            .to_lowercase()
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .collect();
+        Some(match n.as_str() {
+            "ps1" | "psx" | "psone" | "playstation" | "playstation1" => Platform::Ps1,
+            "ps2" | "playstation2" => Platform::Ps2,
+            "ps3" | "playstation3" => Platform::Ps3,
+            "ps4" | "playstation4" => Platform::Ps4,
+            "ps5" | "playstation5" => Platform::Ps5,
+            "psp" | "playstationportable" => Platform::Psp,
+            "vita" | "psvita" | "playstationvita" => Platform::PsVita,
+            "xbox" | "xboxoriginal" | "xboxclassic" => Platform::XboxOriginal,
+            "xbox360" | "x360" => Platform::Xbox360,
+            "xboxone" | "xboxseries" | "xboxseriesx" | "xboxseriess" | "seriesx" | "seriess" => {
+                Platform::XboxSeries
+            }
+            _ => return None,
+        })
+    }
 }
 
 /// What one file contributes to its game.
@@ -63,6 +120,30 @@ pub enum ProbeStatus {
     /// Confirmed continuation of a split set.
     Continuation,
     Unreadable,
+}
+
+impl ProbeStatus {
+    /// The form stored in `console_probe.status` and in `item_file.probe_status`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProbeStatus::Ok => "ok",
+            ProbeStatus::NotPkg => "not_pkg",
+            ProbeStatus::Continuation => "continuation",
+            ProbeStatus::Unreadable => "unreadable",
+        }
+    }
+
+    /// Read a stored status back. An unrecognised value reads as `Unreadable` rather
+    /// than defaulting to `Ok`: claiming a file parsed when we cannot tell would put
+    /// a wrong title on a card.
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "ok" => ProbeStatus::Ok,
+            "not_pkg" => ProbeStatus::NotPkg,
+            "continuation" => ProbeStatus::Continuation,
+            _ => ProbeStatus::Unreadable,
+        }
+    }
 }
 
 /// One file after probing, before grouping.
@@ -438,6 +519,8 @@ mod tests {
                 system_ver: fw,
                 extra: vec![],
             },
+            icon0: None,
+            pic0: None,
         }
     }
 

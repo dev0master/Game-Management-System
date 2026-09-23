@@ -4,6 +4,7 @@
 //! and hand off to the library. Anything that could take more than a moment — a scan —
 //! runs on a blocking thread so the window never freezes.
 
+pub mod console;
 pub mod meta;
 pub mod transfer;
 
@@ -53,16 +54,21 @@ pub struct DriveView {
 ///
 /// Attached volumes are upserted by GUID; everything else is flipped offline but keeps
 /// all of its catalogued contents. This is the operation behind offline browsing.
+///
+/// **Only removable drives are catalogued or returned.** This app manages game drives that
+/// come and go over USB; the system disk is not one of them, and offering it only invites a
+/// scan of somewhere with no games in it. Internal volumes are still enumerated — they have
+/// to be, or every one of them would be flipped offline on each refresh — they are simply
+/// never written to the catalogue and never shown.
 #[tauri::command]
 pub async fn refresh_drives(state: State<'_, AppState>) -> CmdResult<Vec<DriveView>> {
     let present = volume::enumerate();
+    // Every present volume, removable or not: this list decides what stays marked online.
     let guids: Vec<String> = present.iter().map(|v| v.volume_guid.clone()).collect();
 
     let mut db = state.db.lock().map_err(|e| CmdError::from(e.to_string()))?;
     for v in &present {
-        // Volumes with no mount point and no label are system partitions the user
-        // cannot browse; cataloguing them would only add noise.
-        if v.mount_point.is_none() && v.label.is_empty() {
+        if !should_catalogue(v) {
             continue;
         }
         db.upsert_drive(v)?;
@@ -80,10 +86,28 @@ pub async fn refresh_drives(state: State<'_, AppState>) -> CmdResult<Vec<DriveVi
             let is_external = live
                 .as_ref()
                 .map(|v| v.bus_type.is_removable_bus())
+                // Offline, so the stored bus type is all there is to go on.
                 .unwrap_or(row.bus_type == "usb" || row.bus_type == "sd");
             DriveView { row, live, is_external }
         })
+        // Drives catalogued by an earlier build, before this rule existed, are filtered
+        // out here rather than deleted: their items stay in the catalogue until the user
+        // clears it from Settings.
+        .filter(|d| d.is_external)
         .collect())
+}
+
+/// Is this a volume the app manages?
+///
+/// Two rules. A volume with neither a mount point nor a label is a system partition the
+/// user cannot browse, and cataloguing it would only add noise. A volume on a fixed bus is
+/// not a game drive: this app exists to track drives that come and go, and the system disk
+/// never does.
+fn should_catalogue(v: &VolumeInfo) -> bool {
+    if v.mount_point.is_none() && v.label.is_empty() {
+        return false;
+    }
+    v.bus_type.is_removable_bus()
 }
 
 #[derive(Debug, Serialize)]
@@ -229,4 +253,242 @@ pub async fn storage_breakdown(
 #[tauri::command]
 pub async fn catalog_path() -> CmdResult<String> {
     Ok(Db::default_path().to_string_lossy().into_owned())
+}
+
+/* ------------------------------------------------------------ resetting */
+
+/// What a reset removed.
+#[derive(Debug, Default, Serialize)]
+pub struct ResetSummary {
+    pub catalog_removed: bool,
+    pub credentials_removed: bool,
+    pub covers_removed: usize,
+    pub bytes_freed: u64,
+}
+
+/// The token the window must send. A reset is irreversible, so it cannot be reachable by
+/// an accidental or malformed `invoke`.
+const RESET_TOKEN: &str = "RESET-EVERYTHING";
+
+/// Everything this app has ever written, and nothing else.
+///
+/// Listed explicitly rather than deleting the folder wholesale: a recursive delete of a
+/// directory path assembled at runtime is the kind of code that removes the wrong thing
+/// once, and once is enough.
+fn app_data_files(dir: &std::path::Path) -> [PathBuf; 4] {
+    [
+        dir.join("catalog.db"),
+        dir.join("catalog.db-wal"),
+        dir.join("catalog.db-shm"),
+        dir.join("secrets.bin"),
+    ]
+}
+
+/// Erase everything the app has stored and start over empty.
+///
+/// **Nothing on any drive is touched.** Every path removed here is inside
+/// `%LOCALAPPDATA%\GameVault`: the catalogue, the cover cache, and the saved API key. The
+/// games themselves are never opened for writing by this command — the catalogue is a
+/// description of those drives, and deleting a description cannot delete what it describes.
+///
+/// The catalogue is reopened empty before returning, so the window keeps working.
+#[tauri::command]
+pub async fn reset_app_data(
+    confirm: String,
+    state: State<'_, AppState>,
+) -> CmdResult<ResetSummary> {
+    if confirm != RESET_TOKEN {
+        return Err(CmdError::from("reset not confirmed"));
+    }
+
+    let catalog = Db::default_path();
+    let dir = catalog
+        .parent()
+        .ok_or_else(|| CmdError::from("cannot locate the application data folder"))?
+        .to_path_buf();
+    let covers = crate::commands::meta::cover_dir();
+
+    // Refuse to act outside our own folder, whatever the environment says.
+    if !covers.starts_with(&dir) {
+        return Err(CmdError::from("cover cache is outside the application data folder"));
+    }
+
+    // Close the catalogue before deleting it: on Windows an open handle makes the file
+    // undeletable, and the WAL would otherwise be replayed into a resurrected database.
+    let mut db = state.db.lock().map_err(|e| CmdError::from(e.to_string()))?;
+    *db = Db::open_in_memory()?;
+
+    let summary = erase_stored_data(&dir, &covers);
+
+    // Back to a real, empty catalogue so the window is usable immediately.
+    *db = Db::open(&catalog)?;
+    Ok(summary)
+}
+
+/// Delete the app's own files under `dir`, and every cover in `covers`.
+///
+/// Separated from the command so it can be exercised against a fixture directory. This is
+/// the only code in the project that deletes something the user did not point at, so it is
+/// written to be provably incapable of straying: a fixed list of filenames, and one
+/// non-recursive pass over the cover folder.
+fn erase_stored_data(dir: &std::path::Path, covers: &std::path::Path) -> ResetSummary {
+    let mut summary = ResetSummary::default();
+
+    for path in app_data_files(dir) {
+        let Ok(meta) = std::fs::metadata(&path) else { continue };
+        if std::fs::remove_file(&path).is_ok() {
+            summary.bytes_freed += meta.len();
+            if path.ends_with("catalog.db") {
+                summary.catalog_removed = true;
+            }
+            if path.ends_with("secrets.bin") {
+                summary.credentials_removed = true;
+            }
+        }
+    }
+
+    // Covers are deleted one at a time, and only files: a directory in there is left alone
+    // rather than recursively removed.
+    if let Ok(entries) = std::fs::read_dir(covers) {
+        for entry in entries.flatten() {
+            if !entry.file_type().is_ok_and(|t| t.is_file()) {
+                continue;
+            }
+            let len = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            if std::fs::remove_file(entry.path()).is_ok() {
+                summary.covers_removed += 1;
+                summary.bytes_freed += len;
+            }
+        }
+    }
+
+    summary
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::platform::volume::BusType;
+    use std::fs;
+
+    fn tmp(tag: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "gv_reset_{tag}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
+        let _ = fs::remove_dir_all(&p);
+        fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    fn vol(mount: Option<&str>, label: &str, bus: BusType) -> VolumeInfo {
+        VolumeInfo {
+            volume_guid: "{g}".into(),
+            volume_serial: "S".into(),
+            mount_point: mount.map(str::to_string),
+            label: label.into(),
+            filesystem: "exFAT".into(),
+            bus_type: bus,
+            total_bytes: 1,
+            free_bytes: 1,
+            is_unjournaled: false,
+            max_file_bytes: None,
+        }
+    }
+
+    /// The app manages drives that come and go. The system disk is not one of them, and
+    /// offering it invited a scan of somewhere with no games on it.
+    #[test]
+    fn only_removable_drives_are_catalogued() {
+        assert!(should_catalogue(&vol(Some("E:\\"), "GAMES", BusType::Usb)));
+        assert!(should_catalogue(&vol(Some("F:\\"), "SD CARD", BusType::Sd)));
+
+        assert!(!should_catalogue(&vol(Some("C:\\"), "Windows", BusType::Nvme)));
+        assert!(!should_catalogue(&vol(Some("D:\\"), "New Volume", BusType::Nvme)));
+        assert!(!should_catalogue(&vol(Some("G:\\"), "Data", BusType::Sata)));
+        // A partition with neither mount point nor label cannot be browsed at all.
+        assert!(!should_catalogue(&vol(None, "", BusType::Usb)));
+    }
+
+    /// A reset clears what the app stored — and provably nothing else.
+    #[test]
+    fn a_reset_removes_only_the_apps_own_files() {
+        let root = tmp("scope");
+        let dir = root.join("GameVault");
+        let covers = dir.join("covers");
+        fs::create_dir_all(&covers).unwrap();
+
+        fs::write(dir.join("catalog.db"), vec![0u8; 4096]).unwrap();
+        fs::write(dir.join("catalog.db-wal"), vec![0u8; 1024]).unwrap();
+        fs::write(dir.join("catalog.db-shm"), vec![0u8; 512]).unwrap();
+        fs::write(dir.join("secrets.bin"), vec![0u8; 64]).unwrap();
+        fs::write(covers.join("steam412020.jpg"), vec![0u8; 2048]).unwrap();
+        fs::write(covers.join("ps4_CUSA11407.icon0.png"), vec![0u8; 1024]).unwrap();
+
+        // Things that must survive: a game drive beside the data folder, and a file the
+        // app did not write sitting in its own folder.
+        let drive = root.join("E_drive");
+        fs::create_dir_all(&drive).unwrap();
+        fs::write(drive.join("Metro Exodus.pkg"), vec![0u8; 8192]).unwrap();
+        fs::write(dir.join("notes-from-the-user.txt"), b"keep me").unwrap();
+        // A directory inside covers must not be recursed into.
+        fs::create_dir_all(covers.join("subfolder")).unwrap();
+        fs::write(covers.join("subfolder").join("keep.jpg"), vec![0u8; 16]).unwrap();
+
+        let s = erase_stored_data(&dir, &covers);
+
+        assert!(s.catalog_removed);
+        assert!(s.credentials_removed);
+        assert_eq!(s.covers_removed, 2);
+        assert_eq!(s.bytes_freed, 4096 + 1024 + 512 + 64 + 2048 + 1024);
+
+        for gone in ["catalog.db", "catalog.db-wal", "catalog.db-shm", "secrets.bin"] {
+            assert!(!dir.join(gone).exists(), "{gone} should be gone");
+        }
+        assert!(!covers.join("steam412020.jpg").exists());
+
+        // The point of the whole feature.
+        assert!(
+            drive.join("Metro Exodus.pkg").exists(),
+            "a reset must never touch anything on a drive"
+        );
+        assert_eq!(fs::read(dir.join("notes-from-the-user.txt")).unwrap(), b"keep me");
+        assert!(covers.join("subfolder").join("keep.jpg").exists(), "no recursive delete");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Resetting twice is not an error: the second pass simply finds nothing.
+    #[test]
+    fn resetting_an_already_empty_folder_is_harmless() {
+        let root = tmp("empty");
+        let covers = root.join("covers");
+        fs::create_dir_all(&covers).unwrap();
+
+        let s = erase_stored_data(&root, &covers);
+        assert!(!s.catalog_removed);
+        assert!(!s.credentials_removed);
+        assert_eq!(s.covers_removed, 0);
+        assert_eq!(s.bytes_freed, 0);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Only the exact filenames the app writes are removed.
+    #[test]
+    fn the_deletion_list_is_fixed_and_named() {
+        let files = app_data_files(std::path::Path::new("X"));
+        let names: Vec<String> = files
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["catalog.db", "catalog.db-wal", "catalog.db-shm", "secrets.bin"]
+        );
+    }
 }

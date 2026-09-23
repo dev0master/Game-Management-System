@@ -119,7 +119,7 @@ CREATE TABLE IF NOT EXISTS item (
     missing_since_utc TEXT,
 
     -- Console fields. Appended at the end because list_items reads positionally.
-    platform       TEXT,     -- ps4 | xbox360 | xbox
+    platform       TEXT,     -- ps1|ps2|ps3|ps4|ps5|psp|psvita|xbox|xbox360|xboxseries|unknown
     title_id       TEXT,     -- CUSA08948 | 4E4D07D1 — the exact grouping key
     content_id     TEXT,
     group_role     TEXT,     -- game | addon_linked | addon_orphan | update_orphan
@@ -166,8 +166,9 @@ CREATE INDEX IF NOT EXISTS ix_itemfile_item ON item_file(item_id, part_index);
 
 CREATE TABLE IF NOT EXISTS metadata (
     item_id      INTEGER PRIMARY KEY REFERENCES item(id) ON DELETE CASCADE,
-    -- 'steam_applist' | 'igdb' | 'steamgriddb' | 'manual' | 'none'
+    -- 'rawg' | 'igdb' | 'manual' | 'none'
     source       TEXT    NOT NULL DEFAULT 'none',
+    rawg_id      INTEGER,
     igdb_id      INTEGER,
     sgdb_id      INTEGER,
     steam_appid  INTEGER,
@@ -363,5 +364,10 @@ CREATE TABLE IF NOT EXISTS health_finding (
     UNIQUE(drive_id, code, rel_path)
 );
 
-CREATE INDEX IF NOT EXISTS ix_item_titleid  ON item(platform, title_id);
 CREATE INDEX IF NOT EXISTS ix_finding_drive ON health_finding(drive_id, dismissed, resolved_utc);
+
+-- NOTE: the index on item(platform, title_id) is NOT here. It cannot be: this file runs
+-- before migrate(), and on a database created before the console columns existed the
+-- `item` table has no `platform` column yet, so the whole batch would abort and the app
+-- would refuse to open its own catalogue. Indexes over migrated columns are created in
+-- migrate(), after the ALTERs that add them.

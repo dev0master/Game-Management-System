@@ -77,15 +77,32 @@ pub fn unprotect(cipher: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 /// The credentials the metadata provider needs.
+///
+/// One field, because RAWG authenticates with a single key on the query string. Every
+/// field is `#[serde(default)]` so a secrets file written by an older build — which held
+/// Twitch fields for IGDB — still deserialises instead of being read as corrupt.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct Credentials {
-    pub twitch_client_id: String,
-    pub twitch_client_secret: String,
+    #[serde(default)]
+    pub rawg_api_key: String,
 }
 
 impl Credentials {
     pub fn is_complete(&self) -> bool {
-        !self.twitch_client_id.trim().is_empty() && !self.twitch_client_secret.trim().is_empty()
+        !self.rawg_api_key.trim().is_empty()
+    }
+
+    /// The key as it is safe to show: enough to recognise, not enough to reuse.
+    ///
+    /// The settings screen needs to say *which* key is stored without putting the secret
+    /// back into webview memory and into every IPC log.
+    pub fn masked(&self) -> String {
+        let k = self.rawg_api_key.trim();
+        if k.is_empty() {
+            return String::new();
+        }
+        let tail: String = k.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
+        format!("••••••••{tail}")
     }
 }
 
@@ -158,16 +175,28 @@ mod tests {
     #[test]
     fn missing_credentials_are_reported_as_incomplete() {
         assert!(!Credentials::default().is_complete());
-        assert!(Credentials {
-            twitch_client_id: "abc".into(),
-            twitch_client_secret: "def".into()
-        }
-        .is_complete());
+        assert!(Credentials { rawg_api_key: "abc123".into() }.is_complete());
         // Whitespace is not a credential.
-        assert!(!Credentials {
-            twitch_client_id: "  ".into(),
-            twitch_client_secret: "def".into()
-        }
-        .is_complete());
+        assert!(!Credentials { rawg_api_key: "   ".into() }.is_complete());
+    }
+
+    /// The settings screen has to name the stored key without handing it back.
+    #[test]
+    fn the_masked_key_shows_only_its_last_four_characters() {
+        let c = Credentials { rawg_api_key: "11248e2f037d400bb7189b42bb02be5a".into() };
+        let m = c.masked();
+        assert!(m.ends_with("be5a"), "{m}");
+        assert!(!m.contains("11248e2f"), "the secret must not survive masking: {m}");
+        assert_eq!(Credentials::default().masked(), "");
+    }
+
+    /// A secrets file written by the previous build held Twitch fields. It must read as
+    /// "no key saved" rather than as corruption, so the user simply enters a RAWG key.
+    #[test]
+    fn a_secrets_file_from_the_previous_provider_still_parses() {
+        let old = br#"{"twitch_client_id":"abc","twitch_client_secret":"def"}"#;
+        let c: Credentials = serde_json::from_slice(old).expect("older shape still parses");
+        assert!(!c.is_complete());
+        assert_eq!(c.rawg_api_key, "");
     }
 }

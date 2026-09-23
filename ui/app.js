@@ -633,6 +633,7 @@ async function updateReviewBadge() {
 
 const ROUTES = {
   library: renderLibrary,
+  gamefiles: renderGameFiles,
   drives: renderDrives,
   review: renderReview,
   filtered: renderFiltered,
@@ -645,7 +646,7 @@ const ROUTES = {
 async function render() {
   el.title.textContent = t(`title.${state.route}`);
   // The search box only applies to list views.
-  el.search.parentElement.hidden = !['library', 'filtered'].includes(state.route);
+  el.search.parentElement.hidden = !['library', 'gamefiles', 'filtered'].includes(state.route);
   try {
     await ROUTES[state.route]();
   } catch (e) {
@@ -698,6 +699,8 @@ document.addEventListener('keydown', (e) => {
   loadLang();
   initTransferEvents();
   initMetaEvents();
+  initConsoleEvents();
+  gfLoadRoot();
   await loadDrives();
   await updateReviewBadge();
   go('library');

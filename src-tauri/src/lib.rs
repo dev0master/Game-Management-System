@@ -34,6 +34,8 @@ pub fn run() {
             commands::meta::clear_credentials,
             commands::meta::enrich_library,
             commands::meta::lock_metadata,
+            commands::console::read_console_dir,
+            commands::reset_app_data,
         ])
         .run(tauri::generate_context!())
         .expect("error while running GameVault");

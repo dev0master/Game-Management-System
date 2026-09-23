@@ -44,10 +44,42 @@ fn main() {
 
     if args.iter().any(|a| a == "--console") {
         let Some(path) = args.iter().find(|a| !a.starts_with("--")) else {
-            eprintln!("usage: gamevault --console <path>");
+            eprintln!("usage: gamevault --console <path> [--write-covers]");
             std::process::exit(2);
         };
-        print_console(path);
+        // Extraction is opt-in so plain --console stays a pure read everywhere. Even with
+        // the flag, writes go only to the local cover cache, never to the scanned drive.
+        print_console(path, args.iter().any(|a| a == "--write-covers"));
+        return;
+    }
+
+    // Exactly what the Game Files window will show, without opening it. The fastest way to
+    // check a real drive, and the place to look when a game is missing from the window.
+    if args.iter().any(|a| a == "--gamefiles") {
+        let Some(path) = args.iter().find(|a| !a.starts_with("--")) else {
+            eprintln!("usage: gamevault --gamefiles <path>");
+            std::process::exit(2);
+        };
+        print_gamefiles(path);
+        return;
+    }
+
+    // Store the metadata key without it passing through the command line, where it would
+    // land in shell history. Reads `RAWG_API_KEY`, verifies it, then encrypts it with
+    // DPAPI exactly as the Settings screen does.
+    if args.iter().any(|a| a == "--save-key") {
+        save_key_from_env();
+        return;
+    }
+
+    // Check the metadata provider end to end without opening the window: match a title,
+    // then fetch whatever artwork it resolves to.
+    if args.iter().any(|a| a == "--meta") {
+        let Some(title) = args.iter().find(|a| !a.starts_with("--")) else {
+            eprintln!("usage: gamevault --meta \"<game title>\"");
+            std::process::exit(2);
+        };
+        print_meta(title);
         return;
     }
 
@@ -276,12 +308,191 @@ fn index_path(path: &str) {
     println!("  {games} classified as games\n");
 }
 
+/// Verify the key in `RAWG_API_KEY` and store it encrypted.
+///
+/// The key arrives through the environment rather than as an argument so it stays out of
+/// shell history and out of this process's visible command line.
+fn save_key_from_env() {
+    use gamevault_lib::meta::rawg;
+    use gamevault_lib::platform::dpapi::{self, Credentials};
+
+    let Ok(key) = std::env::var("RAWG_API_KEY") else {
+        eprintln!("set RAWG_API_KEY first, then run: gamevault --save-key");
+        std::process::exit(2);
+    };
+    let creds = Credentials { rawg_api_key: key.trim().to_string() };
+    if !creds.is_complete() {
+        eprintln!("RAWG_API_KEY is empty");
+        std::process::exit(2);
+    }
+
+    print!("checking the key… ");
+    if let Err(e) = rawg::test_credentials(&creds) {
+        println!("rejected");
+        eprintln!("  {e}");
+        std::process::exit(1);
+    }
+    println!("accepted");
+
+    match dpapi::save_credentials(&creds) {
+        Ok(()) => println!("saved {} — encrypted for this Windows account only", creds.masked()),
+        Err(e) => {
+            eprintln!("could not save: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Look one title up through the metadata provider and fetch its artwork.
+///
+/// Uses the key saved in Settings. `RAWG_API_KEY` overrides it, so the provider can be
+/// exercised on a machine where nothing has been saved yet — the key then stays out of
+/// the encrypted store and out of this program's arguments.
+fn print_meta(title: &str) {
+    use gamevault_lib::commands::meta::cover_dir;
+    use gamevault_lib::meta::rawg;
+    use gamevault_lib::platform::dpapi::{self, Credentials};
+
+    let creds = match std::env::var("RAWG_API_KEY") {
+        Ok(k) if !k.trim().is_empty() => Credentials { rawg_api_key: k.trim().to_string() },
+        _ => dpapi::load_credentials(),
+    };
+    if !creds.is_complete() {
+        eprintln!("no RAWG key: save one in Settings, or set RAWG_API_KEY for this run");
+        std::process::exit(1);
+    }
+
+    print!("checking the key… ");
+    match rawg::test_credentials(&creds) {
+        Ok(()) => println!("accepted ({})", creds.masked()),
+        Err(e) => {
+            println!("rejected");
+            eprintln!("  {e}");
+            std::process::exit(1);
+        }
+    }
+
+    let started = Instant::now();
+    let found = match rawg::lookup(&creds, title, None) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("lookup failed: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let Some(meta) = found else {
+        println!("\nno confident match for {title:?} — the cover stays a coloured placeholder");
+        return;
+    };
+
+    println!("\nmatched in {:.2?}", started.elapsed());
+    println!("  title    {}", meta.name);
+    println!("  score    {:.1}", meta.match_score);
+    println!("  year     {}", meta.year.map(|y| y.to_string()).unwrap_or_else(|| "-".into()));
+    println!("  genres   {}", if meta.genres.is_empty() { "-".into() } else { meta.genres.join(", ") });
+    println!("  rawg id  {}", meta.rawg_id.map(|i| i.to_string()).unwrap_or_else(|| "-".into()));
+    println!(
+        "  steam    {}",
+        meta.steam_appid.map(|a| a.to_string()).unwrap_or_else(|| "not on Steam".into())
+    );
+
+    match rawg::fetch_cover(&meta, &cover_dir()) {
+        Some(p) => {
+            let bytes = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+            let shape = if meta.steam_appid.is_some() { "portrait box art from Steam" } else { "landscape art from RAWG" };
+            println!("\n  cover    {} ({}, {})", p.display(), human(bytes), shape);
+        }
+        None => println!("\n  cover    none available"),
+    }
+}
+
+/// Read a folder tree exactly as the Game Files window does, and print what it found.
+///
+/// Read-only against the folder. Covers found inside game files are extracted into the
+/// local cache, which is what the window does too — nothing is written to the drive.
+fn print_gamefiles(path: &str) {
+    use gamevault_lib::commands::meta::cover_dir;
+    use gamevault_lib::scan::console::index;
+    use std::collections::HashMap;
+
+    let root = PathBuf::from(path);
+    if !root.is_dir() {
+        eprintln!("folder not found: {}", root.display());
+        std::process::exit(1);
+    }
+
+    // No probe cache from the CLI: this is meant to show the cost of a first read.
+    let read = index::read_tree(&root, &HashMap::new(), &cover_dir(), &mut |_| {});
+
+    println!("\nRead {} in {} ms", read.root, read.stats.elapsed_ms);
+    println!(
+        "  {} folders · {} packages opened · {} from cache",
+        read.stats.dirs_read, read.stats.probed, read.stats.from_cache
+    );
+    println!(
+        "  {} covers from inside game files · {} from images beside them",
+        read.stats.covers_embedded, read.stats.covers_sibling
+    );
+    println!("\n==> {} games\n", read.games.len());
+
+    // How much is really known, per platform.
+    let mut by_platform: std::collections::BTreeMap<&str, (usize, u64)> = Default::default();
+    for g in &read.games {
+        let e = by_platform.entry(&g.platform).or_insert((0, 0));
+        e.0 += 1;
+        e.1 += g.total_bytes;
+    }
+    println!("{:<14}{:>7}{:>12}", "PLATFORM", "GAMES", "SIZE");
+    println!("{}", "-".repeat(33));
+    for (p, (n, bytes)) in &by_platform {
+        println!("{:<14}{:>7}{:>12}", p, n, human(*bytes));
+    }
+
+    println!(
+        "\n{:<38}{:<10}{:<11}{:>9}  {}",
+        "GAME", "PLATFORM", "TITLE ID", "SIZE", "COVER"
+    );
+    println!("{}", "-".repeat(92));
+    for g in &read.games {
+        let cover = match g.cover_source.as_deref() {
+            Some("pkg_icon0") => "from the file",
+            Some("pkg_sibling") => "image beside it",
+            _ => "-",
+        };
+        println!(
+            "{:<38}{:<10}{:<11}{:>9}  {}{}",
+            truncate(&g.display_title, 36),
+            g.platform,
+            g.title_id.as_deref().unwrap_or("-"),
+            human(g.total_bytes),
+            cover,
+            if g.platform_guessed { "  (platform guessed from folder)" } else { "" },
+        );
+    }
+
+    if !read.damaged.is_empty() {
+        let wasted: u64 = read.damaged.iter().map(|f| f.size_bytes).sum();
+        println!("\n=== DAMAGED ({}) — {} ===", read.damaged.len(), human(wasted));
+        for f in &read.damaged {
+            println!("  {:>10}  {:<44} {}", human(f.size_bytes), truncate(&f.name, 42), f.detail);
+        }
+    }
+    println!();
+}
+
 /// Read a directory of console packages and print the games they form.
 ///
-/// Read-only: it opens each package, reads its header, and closes it. Nothing on the
-/// scanned drive is modified.
-fn print_console(path: &str) {
-    use gamevault_lib::scan::console::{group, probe_ps4_dir, ps4};
+/// Read-only against the scanned drive: it opens each package, reads its header, and
+/// closes it. Nothing there is written, moved or removed.
+///
+/// With `write_covers`, artwork found inside the packages is extracted into the local
+/// cover cache under `%LOCALAPPDATA%\GameVault\covers` — still nothing on the drive.
+fn print_console(path: &str, write_covers: bool) {
+    use gamevault_lib::commands::meta::cover_dir;
+    use gamevault_lib::scan::console::{
+        cache_group_cover, group, inspect_artwork, probe_ps4_dir, ps4, ArtworkStatus,
+    };
 
     let dir = PathBuf::from(path);
     let started = Instant::now();
@@ -308,6 +519,14 @@ fn print_console(path: &str) {
 
     let mut groups: Vec<&group::ConsoleGroup> = result.groups.iter().collect();
     groups.sort_by_key(|g| std::cmp::Reverse(g.total_bytes));
+
+    // Tallies for the one question this harness exists to answer.
+    let mut n_embedded = 0usize;
+    let mut n_encrypted = 0usize;
+    let mut n_not_image = 0usize;
+    let mut n_no_entry = 0usize;
+    let mut n_sibling = 0usize;
+    let covers_to = cover_dir();
 
     println!("{:<34}{:<11}{:<7}{:<24}{:>9}", "GAME", "TITLE ID", "FW", "CONTENTS", "SIZE");
     println!("{}", "-".repeat(86));
@@ -336,6 +555,63 @@ fn print_console(path: &str) {
         if let (Some(base), Some(why)) = (&g.linked_base, &g.link_reason) {
             println!("      ↳ add-on for {base} — {why}");
         }
+
+        // The artwork line: what the Game Files window will be able to show.
+        let status = inspect_artwork(&dir, g);
+        match status {
+            ArtworkStatus::Embedded(n) => {
+                n_embedded += 1;
+                print!("      icon0: {:>9}", human(n as u64));
+            }
+            ArtworkStatus::Encrypted => {
+                n_encrypted += 1;
+                print!("      icon0: encrypted");
+            }
+            ArtworkStatus::NotAnImage => {
+                n_not_image += 1;
+                print!("      icon0: not a PNG");
+            }
+            ArtworkStatus::NoEntry => {
+                n_no_entry += 1;
+                let has_sibling = g.count_role(group::ConsoleRole::Cover) > 0;
+                if has_sibling {
+                    n_sibling += 1;
+                }
+                print!(
+                    "      icon0: none{}",
+                    if has_sibling { " (sibling image available)" } else { "" }
+                );
+            }
+        }
+        if write_covers {
+            match cache_group_cover(&dir, g, &covers_to) {
+                Some((p, src)) => {
+                    let name = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                    println!("  →  {name}  [{}]", src.as_str());
+                }
+                None => println!("  →  no cover written"),
+            }
+        } else {
+            println!();
+        }
+    }
+
+    println!(
+        "\n=== ARTWORK: {} games · {} embedded · {} sibling images · {} none ===",
+        groups.len(),
+        n_embedded,
+        n_sibling,
+        n_no_entry - n_sibling + n_encrypted + n_not_image
+    );
+    if n_encrypted > 0 || n_not_image > 0 {
+        println!(
+            "  {n_encrypted} with encrypted metadata, {n_not_image} whose bytes are not a PNG"
+        );
+    }
+    if write_covers {
+        println!("  written to {}", covers_to.display());
+    } else {
+        println!("  (nothing written — pass --write-covers to extract them)");
     }
 
     if !result.ungrouped.is_empty() {
